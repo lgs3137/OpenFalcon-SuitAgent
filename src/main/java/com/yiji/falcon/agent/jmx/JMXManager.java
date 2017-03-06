@@ -21,9 +21,7 @@ import javax.management.MBeanAttributeInfo;
 import javax.management.ObjectInstance;
 import javax.management.ObjectName;
 import java.util.*;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
 /*
@@ -39,6 +37,7 @@ public class JMXManager {
 
     private static final int objectNameListTimeout = 15;
     private static final int mBeanTimeout = 5;
+
 
     /**
      * 获取指定应用的名称(如运行的main类名称)所有的jmx值
@@ -130,9 +129,13 @@ public class JMXManager {
                                     jmxObjectNameInfo.setJmxConnectionInfo(connectionInfo);
                                     try {
                                         for (MBeanAttributeInfo mBeanAttributeInfo : connectionInfo.getmBeanServerConnection().getMBeanInfo(objectName).getAttributes()) {
-                                            map.put(mBeanAttributeInfo.getName(),
-                                                    connectionInfo.getmBeanServerConnection().getAttribute(mbean.getObjectName(),mBeanAttributeInfo.getName())
-                                            );
+                                            ExecutorService mBeanAttrValueGetExec = Executors.newFixedThreadPool(1);
+                                            try {
+                                                Future<Object> value = mBeanAttrValueGetExec.submit(() -> connectionInfo.getmBeanServerConnection().getAttribute(mbean.getObjectName(),mBeanAttributeInfo.getName()));
+                                                map.put(mBeanAttributeInfo.getName(),value.get(3,TimeUnit.SECONDS));
+                                            }finally {
+                                                mBeanAttrValueGetExec.shutdownNow();
+                                            }
                                         }
                                     } catch (Exception e) {
                                         List<Throwable> throwables = ExceptionUtil.getExceptionCauses(e);
@@ -162,7 +165,9 @@ public class JMXManager {
                                 JMXObjectNameInfo jmxObjectNameInfo = (JMXObjectNameInfo) resultOni;
                                 objectNameList.add(jmxObjectNameInfo);
                             }else if(resultOni == null){
-                                mBeanValueGetExceptions.add(new JMXUnavailabilityException(JMXUnavailabilityType.getMbeanValueTimeout,String.format("mbean %s 的值集合获取失败：超时%d秒",mbean.toString(), mBeanTimeout)));
+                                if(!mbean.toString().contains("java.lang:type=Runtime")){//排除Runtime超时
+                                    mBeanValueGetExceptions.add(new JMXUnavailabilityException(JMXUnavailabilityType.getMbeanValueTimeout,String.format("mbean %s 的值集合获取失败：超时%d秒",mbean.toString(), mBeanTimeout)));
+                                }
                             }else if(resultOni instanceof JMXUnavailabilityException){
                                 throw (JMXUnavailabilityException) resultOni;
                             }else if (resultOni instanceof Throwable){
@@ -206,6 +211,17 @@ public class JMXManager {
             }else{
                 //设置返回对象-添加监控值对象,连接不可用也需要返回,以便于构建连接不可用的报告对象
                 jmxMetricsValueInfo.setJmxConnectionInfo(connectionInfo);
+                try {
+                    connectionInfo.getJmxConnector().getConnectionId();
+                } catch (Exception e) {
+                    //精确不可用类型值
+                    if("Not connected".equals(e.getMessage())){
+                        if(connectionInfo.getType() != null){
+                            //若JMX未未连接，设置不可用值为0
+                            connectionInfo.setValid(false,null);
+                        }
+                    }
+                }
                 jmxMetricsValueInfoList.add(jmxMetricsValueInfo);
             }
         }
